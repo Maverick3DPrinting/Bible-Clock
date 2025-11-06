@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Always On Bible Display (ESV)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        /* Always On Display Aesthetic - Black background, minimalist */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #000000;
+            color: #d1d5db; /* Light gray for main text */
+            height: 100vh;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            text-align: center;
+            overflow: hidden; /* Prevent scrolling */
+        }
+        .container {
+            width: 95%;
+            max-width: 600px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+        .time-display {
+            font-size: 5rem;
+            font-weight: 700;
+            color: #10b981; /* Emerald green accent */
+            line-height: 1;
+        }
+        .verse-reference {
+            color: #6ee7b7; /* Lighter green for reference */
+            font-weight: 600;
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+        }
+        .verse-text {
+            font-size: 1.5rem;
+            line-height: 1.7;
+            text-shadow: 0 0 5px rgba(209, 213, 219, 0.2);
+            min-height: 6rem; /* Ensure stability while loading */
+        }
+        /* Loading spinner animation */
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-left-color: #10b981;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        /* Mobile optimization */
+        @media (max-width: 640px) {
+            .time-display {
+                font-size: 4rem;
+            }
+            .verse-text {
+                font-size: 1.25rem;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container rounded-xl">
+    <div id="time-display" class="time-display transition-opacity duration-1000">--:--</div>
+    
+    <!-- Content container, hidden while loading -->
+    <div id="content-area">
+        <div id="verse-reference" class="verse-reference"></div>
+        <div id="verse-text" class="verse-text"></div>
+    </div>
+
+    <!-- Loading spinner, shown while fetching data -->
+    <div id="loading-spinner" class="mt-4 hidden">
+        <div class="spinner"></div>
+        <p class="mt-2 text-sm text-green-400">Finding John H:M (ESV) using Gemini...</p>
+    </div>
+</div>
+
+<script type="module">
+    // Firebase imports required for the runtime environment setup
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // --- FIREBASE/AUTH SETUP (Mandatory for fetch to work in this environment) ---
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+    const db = initializeApp(firebaseConfig);
+    const auth = getAuth(db);
+    const __initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : undefined;
+
+    /**
+     * Authenticates the user using the custom token or anonymously.
+     */
+    async function authenticate() {
+        try {
+            if (__initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+            // console.log("Firebase Auth successful.");
+        } catch (error) {
+            console.error("Firebase Auth failed:", error);
+            // Non-critical, application can proceed but dynamic features might fail.
+        }
+    }
+
+    // --- GLOBAL CONSTANTS AND DOM ELEMENTS ---
+    const timeDisplayEl = document.getElementById('time-display');
+    const verseReferenceEl = document.getElementById('verse-reference');
+    const verseTextEl = document.getElementById('verse-text');
+    const loadingSpinnerEl = document.getElementById('loading-spinner');
+    const contentAreaEl = document.getElementById('content-area');
+    
+    const BOOK_NAME = "John";
+    const TRANSLATION = "ESV";
+    const API_MODEL = "gemini-2.5-flash-preview-09-2025";
+    const API_KEY = ""; // Managed by the environment
+    const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${API_MODEL}:generateContent?key=${API_KEY}`;
+
+    let updateInterval; // To hold the interval timer
+
+    /**
+     * Implements exponential backoff for retrying API calls.
+     * @param {function} fn - The async function to execute.
+     * @param {number} maxRetries - Maximum number of retries.
+     */
+    async function retryWithBackoff(fn, maxRetries = 5) {
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                return await fn();
+            } catch (error) {
+                if (attempt === maxRetries - 1) {
+                    throw error;
+                }
+                const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+
+    /**
+     * Formats the time into a standard 12-hour clock display.
+     */
+    function formatTime(hour24, minute) {
+        const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12; // Convert 0 to 12
+        const ampm = hour24 < 12 ? 'AM' : 'PM';
+        const minutePadded = minute.toString().padStart(2, '0');
+
+        return {
+            time: `${hour12}:${minutePadded}`,
+            ampm: ampm
+        };
+    }
+
+    /**
+     * Calls the Gemini API to search for and retrieve the Bible verse text.
+     * @param {string} chapter - The chapter number (1-12).
+     * @param {string} verse - The verse number (1-59).
+     * @returns {Promise<string>} The verse text or an error message.
+     */
+    async function fetchVerseText(chapter, verse) {
+        const query = `Find the text for ${BOOK_NAME} ${chapter}:${verse} in the ${TRANSLATION} translation. If the verse does not exist (e.g., chapter is too long or verse number is too high), find the *last* available verse in that chapter and return it.`;
+        
+        const payload = {
+            contents: [{ parts: [{ text: query }] }],
+            tools: [{ "google_search": {} }],
+            systemInstruction: {
+                parts: [{ text: "You are a specialized Bible knowledge engine. When asked for a verse, provide *only* the verse text and nothing else, ensuring accuracy using Google Search." }]
+            }
+        };
+
+        const fetchFn = async () => {
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`API call failed with status: ${response.status}`);
+            }
+
+            const result = await response.json();
+            const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            
+            // Clean up any extraneous markdown or quotes the model might add
+            let cleanedText = text || `Could not find a valid response for ${BOOK_NAME} ${chapter}:${verse}.`;
+            cleanedText = cleanedText.replace(/^['"]|['"]$/g, '').trim(); // Remove leading/trailing quotes
+            
+            return cleanedText;
+        };
+
+        try {
+            return await retryWithBackoff(fetchFn);
+        } catch (error) {
+            console.error("Gemini API error after retries:", error);
+            return `Connection error. Please check your network or try again. (${error.message})`;
+        }
+    }
+
+    /**
+     * Main function to update the display content.
+     */
+    async function updateDisplay() {
+        // 1. Get current time reference
+        const now = new Date();
+        const hour24 = now.getHours();
+        const minute = now.getMinutes();
+
+        // Convert 24-hour time to 1-12 format for chapter mapping
+        // Hour 7 in 24hr time is 7, so chapter is 7
+        const chapterNumber = hour24 % 12 === 0 ? 12 : hour24 % 12;
+
+        // Verse number is the minute (1-59). If the user provided 7:36, we use 36.
+        const verseNumber = minute === 0 ? 1 : minute; // Map minute 0 to verse 1
+
+        const formattedTime = formatTime(hour24, minute);
+        // We use the dynamically calculated reference based on the current system time
+        const reference = `${BOOK_NAME} ${chapterNumber}:${verseNumber} (${TRANSLATION})`;
+        
+        // 2. Update time and reference immediately
+        timeDisplayEl.innerHTML = `
+            ${formattedTime.time} 
+            <span class="text-3xl font-normal text-gray-400 align-top">${formattedTime.ampm}</span>
+        `;
+        verseReferenceEl.textContent = reference;
+        verseTextEl.textContent = "Loading..."; // Placeholder while fetching
+        
+        // 3. Show loading state
+        contentAreaEl.classList.remove('hidden');
+        loadingSpinnerEl.classList.remove('hidden');
+
+        // 4. Fetch the verse text
+        // If the current time is 7:36, this will fetch John 7:36 ESV.
+        const verseText = await fetchVerseText(chapterNumber.toString(), verseNumber.toString());
+
+        // 5. Update UI with fetched text and hide spinner
+        verseTextEl.textContent = verseText.trim();
+        loadingSpinnerEl.classList.add('hidden');
+
+        // 6. Set up the next update interval
+        // Calculate time until the next minute update
+        const timeToWait = 60000 - (new Date().getSeconds() * 1000 + new Date().getMilliseconds());
+        
+        if (updateInterval) {
+            clearInterval(updateInterval);
+        }
+        
+        updateInterval = setTimeout(() => {
+            // Call immediately after delay, and then set interval for every minute
+            updateDisplay();
+            updateInterval = setInterval(updateDisplay, 60000);
+        }, timeToWait);
+    }
+
+    // Initialize Auth and start the display update
+    window.onload = async () => {
+        await authenticate();
+        updateDisplay();
+    };
+
+</script>
+</body>
+</html>
+
