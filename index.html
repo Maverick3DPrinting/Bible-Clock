@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- PWA Meta Tag - CRITICAL for full-screen (standalone) launch on Android -->
+    <meta name="mobile-web-app-capable" content="yes">
+    
     <title>Always On Bible Display (ESV)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
@@ -92,8 +95,6 @@
 <script type="module">
     // --- NOTE ON EXTERNAL DEPLOYMENT ---
     // The Firebase imports below are ONLY necessary for the Canvas environment's security.
-    // They will fail on GitHub pages unless Firebase is manually configured.
-    // For this app, we only need the fetch logic, but we keep the imports minimal to avoid errors.
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
     import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
@@ -110,18 +111,15 @@
     const API_MODEL = "gemini-2.5-flash-preview-09-2025";
     
     // !!! CRITICAL for external use: You must set your own Gemini API Key here or the fetches will fail !!!
-    // If you are only running this in the Canvas environment, leave it as ""
-    const API_KEY = "AIzaSyBkb7vB2wl-U4w6IzCGNUk5psrra7mwGhs"; 
+    // This key is currently set by the user in their GitHub code.
+    const API_KEY = "AIzaSyAzb_1234567890abcdefghijklmnopqrstuvwxyz"; // Placeholder
     const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${API_MODEL}:generateContent?key=${API_KEY}`;
 
-    let updateInterval; // To hold the interval timer
+    let updateInterval; 
 
-    // --- ENVIRONMENT-SPECIFIC AUTHENTICATION (Skipped/Ignored in public deployment) ---
+    // --- ENVIRONMENT-SPECIFIC AUTHENTICATION (Ignored in public deployment) ---
     async function authenticate() {
-        if (typeof __app_id === 'undefined') {
-            // We are running outside the Canvas environment, skip auth initialization
-            return;
-        }
+        if (typeof __app_id === 'undefined') { return; }
         
         try {
             const appId = __app_id;
@@ -140,11 +138,8 @@
         }
     }
 
-
     /**
      * Implements exponential backoff for retrying API calls.
-     * @param {function} fn - The async function to execute.
-     * @param {number} maxRetries - Maximum number of retries.
      */
     async function retryWithBackoff(fn, maxRetries = 5) {
         for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -164,7 +159,7 @@
      * Formats the time into a standard 12-hour clock display.
      */
     function formatTime(hour24, minute) {
-        const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12; // Convert 0 (midnight) to 12
+        const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12; 
         const ampm = hour24 < 12 ? 'AM' : 'PM';
         const minutePadded = minute.toString().padStart(2, '0');
 
@@ -176,13 +171,10 @@
 
     /**
      * Calls the Gemini API to search for and retrieve the Bible verse text.
-     * @param {string} chapter - The chapter number (1-12).
-     * @param {string} verse - The verse number (1-59).
-     * @returns {Promise<string>} The verse text or an error message.
      */
     async function fetchVerseText(chapter, verse) {
-        if (!API_KEY) {
-            return "API Key Missing: Please insert your Gemini API Key in the script for verse lookup to work externally.";
+        if (!API_KEY || API_KEY.includes("Placeholder")) {
+            return "API Key Missing: Please insert your Gemini API Key in the script for verse lookup to work.";
         }
         
         const query = `Find the text for ${BOOK_NAME} ${chapter}:${verse} in the ${TRANSLATION} translation. If the verse does not exist, find the *last* available verse in that chapter and return it.`;
@@ -227,21 +219,16 @@
      * Main function to update the display content.
      */
     async function updateDisplay() {
-        // 1. Get current time reference
         const now = new Date();
         const hour24 = now.getHours();
         const minute = now.getMinutes();
-
-        // Convert 24-hour time to 1-12 format for chapter mapping
         const chapterNumber = hour24 % 12 === 0 ? 12 : hour24 % 12;
-
-        // Verse number is the minute (1-59)
         const verseNumber = minute === 0 ? 1 : minute; 
 
         const formattedTime = formatTime(hour24, minute);
         const reference = `${BOOK_NAME} ${chapterNumber}:${verseNumber} (${TRANSLATION})`;
         
-        // 2. Update time and reference immediately
+        // 1. Update time and reference immediately
         timeDisplayEl.innerHTML = `
             ${formattedTime.time} 
             <span class="text-3xl font-normal text-gray-400 align-top">${formattedTime.ampm}</span>
@@ -249,44 +236,35 @@
         verseReferenceEl.textContent = reference;
         verseTextEl.textContent = "Loading..."; 
         
-        // 3. Show loading state
+        // 2. Show loading state
         contentAreaEl.classList.remove('hidden');
         loadingSpinnerEl.classList.remove('hidden');
 
-        // 4. Fetch the verse text
+        // 3. Fetch the verse text
         const verseText = await fetchVerseText(chapterNumber.toString(), verseNumber.toString());
 
-        // 5. Update UI with fetched text and hide spinner
+        // 4. Update UI with fetched text and hide spinner
         verseTextEl.textContent = verseText.trim();
         loadingSpinnerEl.classList.add('hidden');
 
-        // 6. Set up the next update interval
+        // 5. Set up the next update interval
         const timeToWait = 60000 - (new Date().getSeconds() * 1000 + new Date().getMilliseconds());
         
         if (updateInterval) {
             clearTimeout(updateInterval);
         }
         
-        // Use setTimeout to wait until the next exact minute, then set the recurring interval
         updateInterval = setTimeout(() => {
-            updateDisplay(); // Run once at the top of the minute
-            updateInterval = setInterval(updateDisplay, 60000); // Set recurring interval
+            updateDisplay(); 
+            updateInterval = setInterval(updateDisplay, 60000); 
         }, timeToWait);
     }
     
     // --- INITIALIZATION ---
-
-    // Function to start the clock display immediately and then handle the async part
     function initDisplay() {
-        // Run the time update immediately on load to prevent the placeholder
         updateDisplay();
-        
-        // This is where you would optionally call authenticate() if running inside the Canvas
-        // Since we are external, we rely only on the native fetch.
     }
 
-
-    // Start the display right away after the window loads
     window.onload = initDisplay;
 
 </script>
