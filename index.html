@@ -90,34 +90,13 @@
 </div>
 
 <script type="module">
-    // Firebase imports required for the runtime environment setup
+    // --- NOTE ON EXTERNAL DEPLOYMENT ---
+    // The Firebase imports below are ONLY necessary for the Canvas environment's security.
+    // They will fail on GitHub pages unless Firebase is manually configured.
+    // For this app, we only need the fetch logic, but we keep the imports minimal to avoid errors.
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
     import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-
-    // --- FIREBASE/AUTH SETUP (Mandatory for fetch to work in this environment) ---
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-    const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-    const db = initializeApp(firebaseConfig);
-    const auth = getAuth(db);
-    const __initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : undefined;
-
-    /**
-     * Authenticates the user using the custom token or anonymously.
-     */
-    async function authenticate() {
-        try {
-            if (__initial_auth_token) {
-                await signInWithCustomToken(auth, __initial_auth_token);
-            } else {
-                await signInAnonymously(auth);
-            }
-            // console.log("Firebase Auth successful.");
-        } catch (error) {
-            console.error("Firebase Auth failed:", error);
-            // Non-critical, application can proceed but dynamic features might fail.
-        }
-    }
 
     // --- GLOBAL CONSTANTS AND DOM ELEMENTS ---
     const timeDisplayEl = document.getElementById('time-display');
@@ -129,10 +108,38 @@
     const BOOK_NAME = "John";
     const TRANSLATION = "ESV";
     const API_MODEL = "gemini-2.5-flash-preview-09-2025";
-    const API_KEY = ""; // Managed by the environment
+    
+    // !!! CRITICAL for external use: You must set your own Gemini API Key here or the fetches will fail !!!
+    // If you are only running this in the Canvas environment, leave it as ""
+    const API_KEY = ""; 
     const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${API_MODEL}:generateContent?key=${API_KEY}`;
 
     let updateInterval; // To hold the interval timer
+
+    // --- ENVIRONMENT-SPECIFIC AUTHENTICATION (Skipped/Ignored in public deployment) ---
+    async function authenticate() {
+        if (typeof __app_id === 'undefined') {
+            // We are running outside the Canvas environment, skip auth initialization
+            return;
+        }
+        
+        try {
+            const appId = __app_id;
+            const firebaseConfig = JSON.parse(__firebase_config);
+            const db = initializeApp(firebaseConfig);
+            const auth = getAuth(db);
+            const initialAuthToken = __initial_auth_token;
+
+            if (initialAuthToken) {
+                await signInWithCustomToken(auth, initialAuthToken);
+            } else {
+                await signInAnonymously(auth);
+            }
+        } catch (error) {
+            console.error("Firebase Auth failed (expected if running externally):", error);
+        }
+    }
+
 
     /**
      * Implements exponential backoff for retrying API calls.
@@ -157,7 +164,7 @@
      * Formats the time into a standard 12-hour clock display.
      */
     function formatTime(hour24, minute) {
-        const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12; // Convert 0 to 12
+        const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12; // Convert 0 (midnight) to 12
         const ampm = hour24 < 12 ? 'AM' : 'PM';
         const minutePadded = minute.toString().padStart(2, '0');
 
@@ -174,7 +181,11 @@
      * @returns {Promise<string>} The verse text or an error message.
      */
     async function fetchVerseText(chapter, verse) {
-        const query = `Find the text for ${BOOK_NAME} ${chapter}:${verse} in the ${TRANSLATION} translation. If the verse does not exist (e.g., chapter is too long or verse number is too high), find the *last* available verse in that chapter and return it.`;
+        if (!API_KEY) {
+            return "API Key Missing: Please insert your Gemini API Key in the script for verse lookup to work externally.";
+        }
+        
+        const query = `Find the text for ${BOOK_NAME} ${chapter}:${verse} in the ${TRANSLATION} translation. If the verse does not exist, find the *last* available verse in that chapter and return it.`;
         
         const payload = {
             contents: [{ parts: [{ text: query }] }],
@@ -198,9 +209,8 @@
             const result = await response.json();
             const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
             
-            // Clean up any extraneous markdown or quotes the model might add
             let cleanedText = text || `Could not find a valid response for ${BOOK_NAME} ${chapter}:${verse}.`;
-            cleanedText = cleanedText.replace(/^['"]|['"]$/g, '').trim(); // Remove leading/trailing quotes
+            cleanedText = cleanedText.replace(/^['"]|['"]$/g, '').trim(); 
             
             return cleanedText;
         };
@@ -209,7 +219,7 @@
             return await retryWithBackoff(fetchFn);
         } catch (error) {
             console.error("Gemini API error after retries:", error);
-            return `Connection error. Please check your network or try again. (${error.message})`;
+            return `Verse lookup failed: ${error.message}`;
         }
     }
 
@@ -223,14 +233,12 @@
         const minute = now.getMinutes();
 
         // Convert 24-hour time to 1-12 format for chapter mapping
-        // Hour 7 in 24hr time is 7, so chapter is 7
         const chapterNumber = hour24 % 12 === 0 ? 12 : hour24 % 12;
 
-        // Verse number is the minute (1-59). If the user provided 7:36, we use 36.
-        const verseNumber = minute === 0 ? 1 : minute; // Map minute 0 to verse 1
+        // Verse number is the minute (1-59)
+        const verseNumber = minute === 0 ? 1 : minute; 
 
         const formattedTime = formatTime(hour24, minute);
-        // We use the dynamically calculated reference based on the current system time
         const reference = `${BOOK_NAME} ${chapterNumber}:${verseNumber} (${TRANSLATION})`;
         
         // 2. Update time and reference immediately
@@ -239,14 +247,13 @@
             <span class="text-3xl font-normal text-gray-400 align-top">${formattedTime.ampm}</span>
         `;
         verseReferenceEl.textContent = reference;
-        verseTextEl.textContent = "Loading..."; // Placeholder while fetching
+        verseTextEl.textContent = "Loading..."; 
         
         // 3. Show loading state
         contentAreaEl.classList.remove('hidden');
         loadingSpinnerEl.classList.remove('hidden');
 
         // 4. Fetch the verse text
-        // If the current time is 7:36, this will fetch John 7:36 ESV.
         const verseText = await fetchVerseText(chapterNumber.toString(), verseNumber.toString());
 
         // 5. Update UI with fetched text and hide spinner
@@ -254,25 +261,33 @@
         loadingSpinnerEl.classList.add('hidden');
 
         // 6. Set up the next update interval
-        // Calculate time until the next minute update
         const timeToWait = 60000 - (new Date().getSeconds() * 1000 + new Date().getMilliseconds());
         
         if (updateInterval) {
-            clearInterval(updateInterval);
+            clearTimeout(updateInterval);
         }
         
+        // Use setTimeout to wait until the next exact minute, then set the recurring interval
         updateInterval = setTimeout(() => {
-            // Call immediately after delay, and then set interval for every minute
-            updateDisplay();
-            updateInterval = setInterval(updateDisplay, 60000);
+            updateDisplay(); // Run once at the top of the minute
+            updateInterval = setInterval(updateDisplay, 60000); // Set recurring interval
         }, timeToWait);
     }
+    
+    // --- INITIALIZATION ---
 
-    // Initialize Auth and start the display update
-    window.onload = async () => {
-        await authenticate();
+    // Function to start the clock display immediately and then handle the async part
+    function initDisplay() {
+        // Run the time update immediately on load to prevent the placeholder
         updateDisplay();
-    };
+        
+        // This is where you would optionally call authenticate() if running inside the Canvas
+        // Since we are external, we rely only on the native fetch.
+    }
+
+
+    // Start the display right away after the window loads
+    window.onload = initDisplay;
 
 </script>
 </body>
